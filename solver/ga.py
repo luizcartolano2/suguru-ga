@@ -2,11 +2,11 @@ import random
 import copy
 import matplotlib.pyplot as plt
 from typing import List
-from suguru.board import Suguru
+from suguru.board import Board
 
 
 class SuguruGa:
-    def __init__(self, suguru: Suguru, population_size=100, generations=500, mutation_rate=0.1):
+    def __init__(self, suguru: Board, population_size=100, generations=500, mutation_rate=0.1):
         self.original = suguru
         self.rows = suguru.rows
         self.cols = suguru.cols
@@ -48,7 +48,7 @@ class SuguruGa:
                         nr, nc = r + dr, c + dc
                         if 0 <= nr < self.rows and 0 <= nc < self.cols:
                             if grid[nr][nc] == val:
-                                violations += 1
+                                violations += 10
 
         # Check groups for uniqueness and correct value range
         for group in self.groups:
@@ -71,13 +71,33 @@ class SuguruGa:
             missing_values = expected_values - group_value_set
             extra_values = group_value_set - expected_values
 
-            violations += 10 * len(missing_values)  # penalty per missing expected value
+            violations += 5 * len(missing_values)  # penalty per missing expected value
             violations += 5 * len(extra_values)  # penalty per out-of-range value
 
         return violations
 
-    # TODO: implement a different mutation strategy that fix wrong values in a region
-    def mutate(self, grid: List[List[int]]):
+    def smart_mutate(self, grid: List[List[int]]):
+        for group in self.groups:
+            if random.random() < self.mutation_rate:
+                # Extract values from the group
+                cells = [(r, c) for (r, c) in group if not self.fixed[r][c]]
+                values = [grid[r][c] for (r, c) in cells if grid[r][c] is not None]
+
+                # Determine missing and duplicate values
+                n = len(group)
+                expected = set(range(1, n + 1))
+                present = set(values)
+                duplicates = [v for v in values if values.count(v) > 1]
+                missing = list(expected - present)
+
+                if duplicates and missing:
+                    for (r, c) in cells:
+                        if grid[r][c] in duplicates:
+                            new_value = random.choice(missing)
+                            grid[r][c] = new_value
+                            break
+
+    def swap_mutate(self, grid: List[List[int]]):
         for group in self.groups:
             if random.random() < self.mutation_rate:
                 if self.fixed:
@@ -88,12 +108,63 @@ class SuguruGa:
                     (r1, c1), (r2, c2) = random.sample(non_fixed, 2)
                     grid[r1][c1], grid[r2][c2] = grid[r2][c2], grid[r1][c1]
 
+    def mutate(self, grid: List[List[int]], mutation_type: str = "swap"):
+        if mutation_type == "swap":
+            self.swap_mutate(grid)
+        elif mutation_type == "smart":
+            self.smart_mutate(grid)
+
     def crossover(self, parent1, parent2):
+        p = random.random()
+        if p < 0.5:
+            return self.crossover_by_row(parent1, parent2)
+        else:
+            return self.crossover_by_group(parent1, parent2)
+        # else:
+        #     return self.crossover_with_repair(parent1, parent2)
+
+    def crossover_by_row(self, parent1, parent2):
         # Row-wise crossover
         child = [[None for _ in range(self.cols)] for _ in range(self.rows)]
         for r in range(self.rows):
             source = parent1 if random.random() < 0.5 else parent2
             child[r] = source[r][:]
+        return child
+
+    def crossover_by_group(self, parent1, parent2):
+        child = [[None for _ in range(self.cols)] for _ in range(self.rows)]
+        for group in self.groups:
+            source = parent1 if random.random() < 0.5 else parent2
+            for r, c in group:
+                child[r][c] = source[r][c]
+        return child
+
+    def crossover_with_repair(self, parent1, parent2):
+        # Row-wise crossover
+        child = [[None for _ in range(self.cols)] for _ in range(self.rows)]
+        for r in range(self.rows):
+            source = parent1 if random.random() < 0.5 else parent2
+            child[r] = source[r][:]
+
+        # Reparo por grupo
+        for group in self.groups:
+            values = [child[r][c] for r, c in group]
+            n = len(group)
+            used = set()
+            duplicates = []
+            for i, v in enumerate(values):
+                if v in used or not (1 <= v <= n):
+                    duplicates.append(i)
+                else:
+                    used.add(v)
+
+            missing = list(set(range(1, n + 1)) - used)
+            random.shuffle(missing)
+
+            for idx, i in enumerate(duplicates):
+                r, c = group[i]
+                child[r][c] = missing[idx]
+
         return child
 
     def solve(self):
@@ -116,16 +187,20 @@ class SuguruGa:
             best_fitness_over_time.append(best_score)
             avg_fitness_over_time.append(avg_score)
 
-            print(f"Generation {gen:3} | Best: {best_score:3} | Avg: {avg_score:.2f}")
+            print(f"Generation {gen:3} | Best Score: {best_score:3} | Avg Score: {avg_score:.2f}")
 
             if best_score == 0:
                 candidate = self.set_solution(best_grid)
-                if candidate.validate():  # ✅ Ensure full puzzle validity
-                    print(f"✅ Valid solution found in generation {gen}")
+                if candidate.validate():
+                    print(f"Valid solution found in generation {gen}")
                     self.plot_fitness(best_fitness_over_time, avg_fitness_over_time)
                     return candidate
                 else:
-                    print(f"⚠️ Fitness is 0 but solution is invalid. Continuing...")
+                    print(f"Fitness is 0 but solution is invalid. Restarting population...")
+                    self.initialize_population()
+                    best_fitness_over_time.clear()
+                    avg_fitness_over_time.clear()
+                    continue
 
             # Elitism
             elites = [ind for (_, ind) in scored[:elite_count]]
@@ -143,11 +218,11 @@ class SuguruGa:
 
             population = new_population
 
-        print("⚠️ No perfect solution found")
+        print("No perfect solution found")
         self.plot_fitness(best_fitness_over_time, avg_fitness_over_time)
         return self.set_solution(best_grid)
 
-    def set_solution(self, grid: List[List[int]]) -> Suguru:
+    def set_solution(self, grid: List[List[int]]) -> Board:
         solved = copy.deepcopy(self.original)
         for r in range(self.rows):
             for c in range(self.cols):
